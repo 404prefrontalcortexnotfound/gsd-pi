@@ -42,6 +42,7 @@ import {
 	buildSubagentProcessArgs,
 	createSubagentLaunchPlan,
 	isSubagentChildProcess,
+	resolveSubagentProjectRoot,
 	type SubagentContextMode,
 	type SubagentSessionArgs,
 } from "./launch.js";
@@ -421,6 +422,7 @@ async function runSingleAgent(
 	// Trailing param (kept after trackingName so existing positional call sites
 	// don't shift). Reasoning effort forwarded to the child (#508).
 	thinkingOverride?: string,
+	projectRoot?: string,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -500,6 +502,7 @@ async function runSingleAgent(
 			session: sessionOverride,
 			cwd,
 			defaultCwd,
+			projectRoot,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
 		let wasAborted = false;
@@ -589,10 +592,11 @@ async function runSingleAgentInCmuxSplit(
 	trackingName?: string,
 	// Trailing param (see runSingleAgent). Reasoning effort forwarded to the child (#508).
 	thinkingOverride?: string,
+	projectRoot?: string,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 	if (!agent) {
-		return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride);
+		return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
 	}
 
 	let tmpPromptDir: string | null = null;
@@ -639,7 +643,7 @@ async function runSingleAgentInCmuxSplit(
 			? await cmuxClient.createSplit(directionOrSurfaceId as "right" | "down" | "left" | "up")
 			: directionOrSurfaceId;
 		if (!cmuxSurfaceId) {
-			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride);
+			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
 		}
 
 		const bundledPaths = (process.env.GSD_BUNDLED_EXTENSION_PATHS ?? "").split(path.delimiter).map((s) => s.trim()).filter(Boolean);
@@ -655,6 +659,7 @@ async function runSingleAgentInCmuxSplit(
 			session: sessionOverride,
 			cwd,
 			defaultCwd,
+			projectRoot,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
 		const processArgs = [process.env.GSD_BIN_PATH!, ...extensionArgs, ...launch.args];
@@ -674,7 +679,7 @@ async function runSingleAgentInCmuxSplit(
 
 		const sent = await cmuxClient.sendSurface(cmuxSurfaceId, `bash -lc ${shellEscape(innerScript)}`);
 		if (!sent) {
-			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride);
+			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
 		}
 
 		const finished = await waitForFile(exitPath, signal);
@@ -1249,6 +1254,9 @@ export default function (pi: ExtensionAPI) {
 							const taskId = crypto.randomUUID();
 							isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
 						}
+						const projectRoot = isolation
+							? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
+							: undefined;
 						const result = await runSingleAgent(
 							ctx.cwd,
 							agents,
@@ -1267,6 +1275,7 @@ export default function (pi: ExtensionAPI) {
 							undefined,
 							dispatchTrackingNames[0],
 							params.thinking,
+							projectRoot,
 						);
 						if (isolation && result.exitCode === 0) {
 							const patches = await isolation.captureDelta();
@@ -1420,8 +1429,8 @@ export default function (pi: ExtensionAPI) {
 					? await cmuxClient.createGridLayout(Math.min(batchSize, MAX_CONCURRENCY))
 					: [];
 				const results = await mapWithConcurrencyLimit(taskParams, MAX_CONCURRENCY, async (t, index) => {
-					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId);
-					const taskModel = t.model || params.model;
+						const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId);
+						const taskModel = t.model || params.model;
 						const taskThinking = t.thinking || params.thinking;
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
@@ -1430,7 +1439,7 @@ export default function (pi: ExtensionAPI) {
 							emitParallelUpdate();
 						}
 					};
-					const executeOnce = (runCwd: string | undefined) => cmuxSplitsEnabled
+					const executeOnce = (runCwd: string | undefined, projectRoot?: string) => cmuxSplitsEnabled
 						? runSingleAgentInCmuxSplit(
 								cmuxClient,
 								gridSurfaces[index] ?? (index % 2 === 0 ? "right" : "down"),
@@ -1449,6 +1458,7 @@ export default function (pi: ExtensionAPI) {
 								undefined,
 								dispatchTrackingNames[index],
 								taskThinking,
+								projectRoot,
 							)
 						: runSingleAgent(
 								ctx.cwd,
@@ -1466,6 +1476,7 @@ export default function (pi: ExtensionAPI) {
 								undefined,
 								dispatchTrackingNames[index],
 								taskThinking,
+								projectRoot,
 							);
 					const runTask = async () => {
 						let isolation: IsolationEnvironment | null = null;
@@ -1476,7 +1487,10 @@ export default function (pi: ExtensionAPI) {
 								isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
 							}
 
-							const result = await executeOnce(isolation ? isolation.workDir : effectiveCwd);
+							const projectRoot = isolation
+								? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
+								: undefined;
+							const result = await executeOnce(isolation ? isolation.workDir : effectiveCwd, projectRoot);
 							if (isolation && result.exitCode === 0) {
 								const patches = await isolation.captureDelta();
 								const mergeResult = patches.length > 0
@@ -1541,6 +1555,9 @@ export default function (pi: ExtensionAPI) {
 						const taskId = crypto.randomUUID();
 						isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
 					}
+					const projectRoot = isolation
+						? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
+						: undefined;
 
 					const singleUpdate: OnUpdateCallback = (partial) => {
 						if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
@@ -1565,6 +1582,7 @@ export default function (pi: ExtensionAPI) {
 							undefined,
 							dispatchTrackingNames[0],
 							params.thinking,
+							projectRoot,
 						)
 						: await runSingleAgent(
 							ctx.cwd,
@@ -1582,6 +1600,7 @@ export default function (pi: ExtensionAPI) {
 							undefined,
 							dispatchTrackingNames[0],
 							params.thinking,
+							projectRoot,
 						);
 					finalResults = [result];
 
