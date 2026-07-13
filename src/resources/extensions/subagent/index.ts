@@ -404,6 +404,16 @@ function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
 	return lines.join("\n");
 }
 
+interface SubagentRunOptions {
+	modelOverride?: string;
+	contextMode: SubagentContextMode;
+	parentSessionManager?: Parameters<typeof createSubagentLaunchPlan>[0]["parentSessionManager"];
+	sessionOverride?: SubagentSessionArgs;
+	trackingName?: string;
+	thinkingOverride?: string;
+	projectRoot?: string;
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -414,16 +424,17 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	modelOverride?: string,
-	contextMode: SubagentContextMode = "fresh",
-	parentSessionManager?: Parameters<typeof createSubagentLaunchPlan>[0]["parentSessionManager"],
-	sessionOverride?: SubagentSessionArgs,
-	trackingName?: string,
-	// Trailing param (kept after trackingName so existing positional call sites
-	// don't shift). Reasoning effort forwarded to the child (#508).
-	thinkingOverride?: string,
-	projectRoot?: string,
+	options: SubagentRunOptions,
 ): Promise<SingleResult> {
+	const {
+		modelOverride,
+		contextMode,
+		parentSessionManager,
+		sessionOverride,
+		trackingName,
+		thinkingOverride,
+		projectRoot,
+	} = options;
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
@@ -585,18 +596,20 @@ async function runSingleAgentInCmuxSplit(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	modelOverride?: string,
-	contextMode: SubagentContextMode = "fresh",
-	parentSessionManager?: Parameters<typeof createSubagentLaunchPlan>[0]["parentSessionManager"],
-	sessionOverride?: SubagentSessionArgs,
-	trackingName?: string,
-	// Trailing param (see runSingleAgent). Reasoning effort forwarded to the child (#508).
-	thinkingOverride?: string,
-	projectRoot?: string,
+	options: SubagentRunOptions,
 ): Promise<SingleResult> {
+	const {
+		modelOverride,
+		contextMode,
+		parentSessionManager,
+		sessionOverride,
+		trackingName,
+		thinkingOverride,
+		projectRoot,
+	} = options;
 	const agent = agents.find((a) => a.name === agentName);
 	if (!agent) {
-		return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
+		return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 	}
 
 	let tmpPromptDir: string | null = null;
@@ -643,7 +656,7 @@ async function runSingleAgentInCmuxSplit(
 			? await cmuxClient.createSplit(directionOrSurfaceId as "right" | "down" | "left" | "up")
 			: directionOrSurfaceId;
 		if (!cmuxSurfaceId) {
-			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
+			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
 
 		const bundledPaths = (process.env.GSD_BUNDLED_EXTENSION_PATHS ?? "").split(path.delimiter).map((s) => s.trim()).filter(Boolean);
@@ -679,7 +692,7 @@ async function runSingleAgentInCmuxSplit(
 
 		const sent = await cmuxClient.sendSurface(cmuxSurfaceId, `bash -lc ${shellEscape(innerScript)}`);
 		if (!sent) {
-			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, modelOverride, contextMode, parentSessionManager, sessionOverride, trackingName, thinkingOverride, projectRoot);
+			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
 
 		const finished = await waitForFile(exitPath, signal);
@@ -948,12 +961,14 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
-					params.model,
-					"fresh",
-					ctx.sessionManager,
-					{ mode: "fork", sessionFile: selected.sessionFile, sessionDir: path.dirname(selected.sessionFile) },
-					selected.trackingName,
-					params.thinking,
+					{
+						modelOverride: params.model,
+						contextMode: "fresh",
+						parentSessionManager: ctx.sessionManager,
+						sessionOverride: { mode: "fork", sessionFile: selected.sessionFile, sessionDir: path.dirname(selected.sessionFile) },
+						trackingName: selected.trackingName,
+						thinkingOverride: params.thinking,
+					},
 				);
 				return {
 					content: [{ type: "text", text: getFinalOutput(result.messages) || result.errorMessage || result.stderr || "(no output)" }],
@@ -1269,13 +1284,14 @@ export default function (pi: ExtensionAPI) {
 								if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
 							},
 							makeDetails("single"),
-							params.model,
-							contextMode,
-							ctx.sessionManager,
-							undefined,
-							dispatchTrackingNames[0],
-							params.thinking,
-							projectRoot,
+							{
+								modelOverride: params.model,
+								contextMode,
+								parentSessionManager: ctx.sessionManager,
+								trackingName: dispatchTrackingNames[0],
+								thinkingOverride: params.thinking,
+								projectRoot,
+							},
 						);
 						if (isolation && result.exitCode === 0) {
 							const patches = await isolation.captureDelta();
@@ -1345,12 +1361,13 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
-						step.model || params.model,
-						step.context ?? contextMode,
-						ctx.sessionManager,
-						undefined,
-						dispatchTrackingNames[i],
-						step.thinking || params.thinking,
+						{
+							modelOverride: step.model || params.model,
+							contextMode: step.context ?? contextMode,
+							parentSessionManager: ctx.sessionManager,
+							trackingName: dispatchTrackingNames[i],
+							thinkingOverride: step.thinking || params.thinking,
+						},
 					);
 					results.push(result);
 					persistRunResults(results);
@@ -1439,8 +1456,17 @@ export default function (pi: ExtensionAPI) {
 							emitParallelUpdate();
 						}
 					};
-					const executeOnce = (runCwd: string | undefined, projectRoot?: string) => cmuxSplitsEnabled
-						? runSingleAgentInCmuxSplit(
+					const executeOnce = (runCwd: string | undefined, projectRoot?: string) => {
+						const runOptions: SubagentRunOptions = {
+							modelOverride: taskModel,
+							contextMode: t.context ?? contextMode,
+							parentSessionManager: ctx.sessionManager,
+							trackingName: dispatchTrackingNames[index],
+							thinkingOverride: taskThinking,
+							projectRoot,
+						};
+						return cmuxSplitsEnabled
+							? runSingleAgentInCmuxSplit(
 								cmuxClient,
 								gridSurfaces[index] ?? (index % 2 === 0 ? "right" : "down"),
 								ctx.cwd,
@@ -1452,15 +1478,9 @@ export default function (pi: ExtensionAPI) {
 								signal,
 								updateParallelResult,
 								makeDetails("parallel"),
-								taskModel,
-								t.context ?? contextMode,
-								ctx.sessionManager,
-								undefined,
-								dispatchTrackingNames[index],
-								taskThinking,
-								projectRoot,
+								runOptions,
 							)
-						: runSingleAgent(
+							: runSingleAgent(
 								ctx.cwd,
 								agents,
 								t.agent,
@@ -1470,14 +1490,9 @@ export default function (pi: ExtensionAPI) {
 								signal,
 								updateParallelResult,
 								makeDetails("parallel"),
-								taskModel,
-								t.context ?? contextMode,
-								ctx.sessionManager,
-								undefined,
-								dispatchTrackingNames[index],
-								taskThinking,
-								projectRoot,
+								runOptions,
 							);
+					};
 					const runTask = async () => {
 						let isolation: IsolationEnvironment | null = null;
 						const effectiveCwd = resolveSubagentWorktreeCwd(ctx.cwd, t.cwd);
@@ -1563,6 +1578,14 @@ export default function (pi: ExtensionAPI) {
 						if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
 						if (onUpdate) onUpdate(partial);
 					};
+					const runOptions: SubagentRunOptions = {
+						modelOverride: params.model,
+						contextMode,
+						parentSessionManager: ctx.sessionManager,
+						trackingName: dispatchTrackingNames[0],
+						thinkingOverride: params.thinking,
+						projectRoot,
+					};
 					const result = cmuxSplitsEnabled
 						? await runSingleAgentInCmuxSplit(
 							cmuxClient,
@@ -1576,13 +1599,7 @@ export default function (pi: ExtensionAPI) {
 							signal,
 							singleUpdate,
 							makeDetails("single"),
-							params.model,
-							contextMode,
-							ctx.sessionManager,
-							undefined,
-							dispatchTrackingNames[0],
-							params.thinking,
-							projectRoot,
+							runOptions,
 						)
 						: await runSingleAgent(
 							ctx.cwd,
@@ -1594,13 +1611,7 @@ export default function (pi: ExtensionAPI) {
 							signal,
 							singleUpdate,
 							makeDetails("single"),
-							params.model,
-							contextMode,
-							ctx.sessionManager,
-							undefined,
-							dispatchTrackingNames[0],
-							params.thinking,
-							projectRoot,
+							runOptions,
 						);
 					finalResults = [result];
 
